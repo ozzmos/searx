@@ -29,7 +29,7 @@ from searx.poolrequests import get as http_get
 
 def get(*args, **kwargs):
     if 'timeout' not in kwargs:
-        kwargs['timeout'] = settings['server']['request_timeout']
+        kwargs['timeout'] = settings['outgoing']['request_timeout']
 
     return http_get(*args, **kwargs)
 
@@ -57,17 +57,17 @@ def searx_bang(full_query):
             # check if query starts with categorie name
             for categorie in categories:
                 if categorie.startswith(engine_query):
-                    results.append(first_char+'{categorie}'.format(categorie=categorie))
+                    results.append(first_char + '{categorie}'.format(categorie=categorie))
 
             # check if query starts with engine name
             for engine in engines:
                 if engine.startswith(engine_query.replace('_', ' ')):
-                    results.append(first_char+'{engine}'.format(engine=engine.replace(' ', '_')))
+                    results.append(first_char + '{engine}'.format(engine=engine.replace(' ', '_')))
 
             # check if query starts with engine shortcut
             for engine_shortcut in engine_shortcuts:
                 if engine_shortcut.startswith(engine_query):
-                    results.append(first_char+'{engine_shortcut}'.format(engine_shortcut=engine_shortcut))
+                    results.append(first_char + '{engine_shortcut}'.format(engine_shortcut=engine_shortcut))
 
     # check if current query stats with :bang
     elif first_char == ':':
@@ -110,12 +110,11 @@ def searx_bang(full_query):
     return list(result_set)
 
 
-def dbpedia(query):
+def dbpedia(query, lang):
     # dbpedia autocompleter, no HTTPS
-    autocomplete_url = 'http://lookup.dbpedia.org/api/search.asmx/KeywordSearch?'  # noqa
+    autocomplete_url = 'http://lookup.dbpedia.org/api/search.asmx/KeywordSearch?'
 
-    response = get(autocomplete_url
-                   + urlencode(dict(QueryString=query)))
+    response = get(autocomplete_url + urlencode(dict(QueryString=query)))
 
     results = []
 
@@ -127,7 +126,7 @@ def dbpedia(query):
     return results
 
 
-def duckduckgo(query):
+def duckduckgo(query, lang):
     # duckduckgo autocompleter
     url = 'https://ac.duckduckgo.com/ac/?{0}&type=list'
 
@@ -137,12 +136,11 @@ def duckduckgo(query):
     return []
 
 
-def google(query):
+def google(query, lang):
     # google autocompleter
-    autocomplete_url = 'https://suggestqueries.google.com/complete/search?client=toolbar&'  # noqa
+    autocomplete_url = 'https://suggestqueries.google.com/complete/search?client=toolbar&'
 
-    response = get(autocomplete_url
-                   + urlencode(dict(q=query)))
+    response = get(autocomplete_url + urlencode(dict(hl=lang, q=query)))
 
     results = []
 
@@ -153,9 +151,36 @@ def google(query):
     return results
 
 
-def wikipedia(query):
+def startpage(query, lang):
+    # startpage autocompleter
+    url = 'https://startpage.com/do/suggest?{query}'
+
+    resp = get(url.format(query=urlencode({'query': query}))).text.split('\n')
+    if len(resp) > 1:
+        return resp
+    return []
+
+
+def qwant(query, lang):
+    # qwant autocompleter (additional parameter : lang=en_en&count=xxx )
+    url = 'https://api.qwant.com/api/suggest?{query}'
+
+    resp = get(url.format(query=urlencode({'q': query, 'lang': lang})))
+
+    results = []
+
+    if resp.ok:
+        data = loads(resp.text)
+        if data['status'] == 'success':
+            for item in data['data']['items']:
+                results.append(item['value'])
+
+    return results
+
+
+def wikipedia(query, lang):
     # wikipedia autocompleter
-    url = 'https://en.wikipedia.org/w/api.php?action=opensearch&{0}&limit=10&namespace=0&format=json'  # noqa
+    url = 'https://' + lang + '.wikipedia.org/w/api.php?action=opensearch&{0}&limit=10&namespace=0&format=json'
 
     resp = loads(get(url.format(urlencode(dict(search=query)))).text)
     if len(resp) > 1:
@@ -166,5 +191,7 @@ def wikipedia(query):
 backends = {'dbpedia': dbpedia,
             'duckduckgo': duckduckgo,
             'google': google,
+            'startpage': startpage,
+            'qwant': qwant,
             'wikipedia': wikipedia
             }

@@ -34,3 +34,20 @@ generally made searx better:
 - @opi
 - @dimqua
 - Giorgos Logiotatidis
+- Luc Didry
+- Niklas Haas
+- @underr
+- Emmanuel Benazera
+- @GreenLunar
+- Noemi Vanyi
+- Kang-min Liu
+- Kirill Isakov
+- Guilhem Bonnefille
+- Marc Abonce Seguin
+
+- @jibe-b
+- Christian Pietsch @pietsch
+- @Maxqia
+- Ashutosh Das @pyprism
+- YuLun Shih @imZack
+- Dmitry Mikhirev @mikhirev

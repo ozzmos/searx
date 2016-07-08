@@ -52,7 +52,13 @@ def request(query, params):
 def response(resp):
     results = []
 
-    dom = html.fromstring(resp.content)
+    dom = html.fromstring(resp.text)
+
+    try:
+        results.append({'number_of_results': int(dom.xpath('//span[@class="sb_count"]/text()')[0]
+                                                 .split()[0].replace(',', ''))})
+    except:
+        pass
 
     # parse results
     for result in dom.xpath('//div[@class="sa_cc"]'):
@@ -65,10 +71,6 @@ def response(resp):
         results.append({'url': url,
                         'title': title,
                         'content': content})
-
-    # return results if something is found
-    if results:
-        return results
 
     # parse results again if nothing is found yet
     for result in dom.xpath('//li[@class="b_algo"]'):

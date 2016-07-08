@@ -101,7 +101,7 @@
                 <th>{{ _('Category') }}</th>
                 <th>{{ _('Allow') }} / {{ _('Block') }}</th>
             </tr>
-        {% for categ in categories %}
+        {% for categ in all_categories %}
             {% for search_engine in engines_by_category[categ] %}
 
                 {% if not search_engine.private %}
@@ -109,7 +109,7 @@
                     <td>{{ search_engine.name }} ({{ shortcuts[search_engine.name] }})&lrm;</td>
                     <td>{{ _(categ) }}</td>
                     <td class="engine_checkbox">
-                        <input type="checkbox" id="engine_{{ categ|replace(' ', '_') }}_{{ search_engine.name|replace(' ', '_') }}" name="engine_{{ search_engine.name }}__{{ categ }}"{% if (search_engine.name, categ) in blocked_engines %} checked="checked"{% endif %} />
+                        <input type="checkbox" id="engine_{{ categ|replace(' ', '_') }}_{{ search_engine.name|replace(' ', '_') }}" name="engine_{{ search_engine.name }}__{{ categ }}"{% if (search_engine.name, categ) in disabled_engines %} checked="checked"{% endif %} />
                         <label class="allow" for="engine_{{ categ|replace(' ', '_') }}_{{ search_engine.name|replace(' ', '_') }}">{{ _('Allow') }}</label>
                         <label class="deny" for="engine_{{ categ|replace(' ', '_') }}_{{ search_engine.name|replace(' ', '_') }}">{{ _('Block') }}</label>
                     </td>

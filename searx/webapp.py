@@ -42,13 +42,14 @@ except:
 
 from datetime import datetime, timedelta
 from urllib import urlencode
-from urlparse import urlparse
+from urlparse import urlparse, urljoin
 from werkzeug.contrib.fixers import ProxyFix
 from flask import (
     Flask, request, render_template, url_for, Response, make_response,
     redirect, send_from_directory
 )
-from flask.ext.babel import Babel, gettext, format_date
+from flask_babel import Babel, gettext, format_date, format_decimal
+from flask.json import jsonify
 from searx import settings, searx_dir
 from searx.engines import (
     categories, engines, get_engines_stats, engine_shortcuts
@@ -56,7 +57,7 @@ from searx.engines import (
 from searx.utils import (
     UnicodeWriter, highlight_content, html_to_text, get_themes,
     get_static_files, get_result_templates, gen_useragent, dict_subset,
-    prettify_url, get_blocked_engines
+    prettify_url
 )
 from searx.version import VERSION_STRING
 from searx.languages import language_codes
@@ -64,6 +65,7 @@ from searx.search import Search
 from searx.query import Query
 from searx.autocomplete import searx_bang, backends as autocomplete_backends
 from searx.plugins import plugins
+from searx.preferences import Preferences, ValidationException
 
 # check if the pyopenssl, ndg-httpsclient, pyasn1 packages are installed.
 # They are needed for SSL connection without trouble, see #298
@@ -73,15 +75,15 @@ try:
     import pyasn1  # NOQA
 except ImportError:
     logger.critical("The pyopenssl, ndg-httpsclient, pyasn1 packages have to be installed.\n"
-                    "Some HTTPS connections will failed")
+                    "Some HTTPS connections will fail")
 
 
 static_path, templates_path, themes =\
-    get_themes(settings['themes_path']
-               if settings.get('themes_path')
+    get_themes(settings['ui']['themes_path']
+               if settings['ui']['themes_path']
                else searx_dir)
 
-default_theme = settings['server'].get('default_theme', 'default')
+default_theme = settings['ui']['default_theme']
 
 static_files = get_static_files(searx_dir)
 
@@ -109,8 +111,7 @@ for indice, theme in enumerate(themes):
     for (dirpath, dirnames, filenames) in os.walk(theme_img_path):
         global_favicons[indice].extend(filenames)
 
-cookie_max_age = 60 * 60 * 24 * 365 * 5  # 5 years
-
+# used when translating category names
 _category_names = (gettext('files'),
                    gettext('general'),
                    gettext('music'),
@@ -119,20 +120,18 @@ _category_names = (gettext('files'),
                    gettext('videos'),
                    gettext('it'),
                    gettext('news'),
-                   gettext('map'))
+                   gettext('map'),
+                   gettext('science'))
 
-outgoing_proxies = settings.get('outgoing_proxies', None)
+outgoing_proxies = settings['outgoing'].get('proxies', None)
 
 
 @babel.localeselector
 def get_locale():
     locale = request.accept_languages.best_match(settings['locales'].keys())
 
-    if settings['server'].get('default_locale'):
-        locale = settings['server']['default_locale']
-
-    if request.cookies.get('locale', '') in settings['locales']:
-        locale = request.cookies.get('locale', '')
+    if request.preferences.get_value('locale') != '':
+        locale = request.preferences.get_value('locale')
 
     if 'locale' in request.args\
        and request.args['locale'] in settings['locales']:
@@ -221,9 +220,7 @@ def get_current_theme_name(override=None):
 
     if override and override in themes:
         return override
-    theme_name = request.args.get('theme',
-                                  request.cookies.get('theme',
-                                                      default_theme))
+    theme_name = request.args.get('theme', request.preferences.get_value('theme'))
     if theme_name not in themes:
         theme_name = default_theme
     return theme_name
@@ -250,7 +247,7 @@ def image_proxify(url):
     if url.startswith('//'):
         url = 'https:' + url
 
-    if not settings['server'].get('image_proxy') and not request.cookies.get('image_proxy'):
+    if not request.preferences.get_value('image_proxy'):
         return url
 
     hash_string = url + settings['server']['secret_key']
@@ -261,23 +258,24 @@ def image_proxify(url):
 
 
 def render(template_name, override_theme=None, **kwargs):
-    blocked_engines = get_blocked_engines(engines, request.cookies)
+    disabled_engines = request.preferences.engines.get_disabled()
 
-    autocomplete = request.cookies.get('autocomplete')
-
-    if autocomplete not in autocomplete_backends:
-        autocomplete = None
-
-    nonblocked_categories = set(category for engine_name in engines
-                                for category in engines[engine_name].categories
-                                if (engine_name, category) not in blocked_engines)
+    enabled_categories = set(category for engine_name in engines
+                             for category in engines[engine_name].categories
+                             if (engine_name, category) not in disabled_engines)
 
     if 'categories' not in kwargs:
         kwargs['categories'] = ['general']
         kwargs['categories'].extend(x for x in
                                     sorted(categories.keys())
                                     if x != 'general'
-                                    and x in nonblocked_categories)
+                                    and x in enabled_categories)
+
+    if 'all_categories' not in kwargs:
+        kwargs['all_categories'] = ['general']
+        kwargs['all_categories'].extend(x for x in
+                                        sorted(categories.keys())
+                                        if x != 'general')
 
     if 'selected_categories' not in kwargs:
         kwargs['selected_categories'] = []
@@ -286,25 +284,26 @@ def render(template_name, override_theme=None, **kwargs):
                 c = arg.split('_', 1)[1]
                 if c in categories:
                     kwargs['selected_categories'].append(c)
+
     if not kwargs['selected_categories']:
-        cookie_categories = request.cookies.get('categories', '').split(',')
+        cookie_categories = request.preferences.get_value('categories')
         for ccateg in cookie_categories:
-            if ccateg in categories:
-                kwargs['selected_categories'].append(ccateg)
+            kwargs['selected_categories'].append(ccateg)
+
     if not kwargs['selected_categories']:
         kwargs['selected_categories'] = ['general']
 
     if 'autocomplete' not in kwargs:
-        kwargs['autocomplete'] = autocomplete
+        kwargs['autocomplete'] = request.preferences.get_value('autocomplete')
 
     if get_locale() in rtl_locales and 'rtl' not in kwargs:
         kwargs['rtl'] = True
 
     kwargs['searx_version'] = VERSION_STRING
 
-    kwargs['method'] = request.cookies.get('method', 'POST')
+    kwargs['method'] = request.preferences.get_value('method')
 
-    kwargs['safesearch'] = request.cookies.get('safesearch', '1')
+    kwargs['safesearch'] = str(request.preferences.get_value('safesearch'))
 
     # override url_for function in templates
     kwargs['url_for'] = url_for_theme
@@ -318,6 +317,8 @@ def render(template_name, override_theme=None, **kwargs):
     kwargs['template_name'] = template_name
 
     kwargs['cookies'] = request.cookies
+
+    kwargs['instance_name'] = settings['general']['instance_name']
 
     kwargs['scripts'] = set()
     for plugin in request.user_plugins:
@@ -336,14 +337,18 @@ def render(template_name, override_theme=None, **kwargs):
 @app.before_request
 def pre_request():
     # merge GET, POST vars
+    preferences = Preferences(themes, categories.keys(), engines, plugins)
+    preferences.parse_cookies(request.cookies)
+    request.preferences = preferences
+
     request.form = dict(request.form.items())
     for k, v in request.args.items():
         if k not in request.form:
             request.form[k] = v
 
     request.user_plugins = []
-    allowed_plugins = request.cookies.get('allowed_plugins', '').split(',')
-    disabled_plugins = request.cookies.get('disabled_plugins', '').split(',')
+    allowed_plugins = preferences.plugins.get_enabled()
+    disabled_plugins = preferences.plugins.get_disabled()
     for plugin in plugins:
         if ((plugin.default_on and plugin.id not in disabled_plugins)
                 or plugin.id in allowed_plugins):
@@ -375,7 +380,7 @@ def index():
 
     plugins.call('post_search', request, locals())
 
-    for result in search.results:
+    for result in search.result_container.get_ordered_results():
 
         plugins.call('on_result', request, locals())
         if not search.paging and engines[result['engine']].paging:
@@ -397,56 +402,61 @@ def index():
 
         # TODO, check if timezone is calculated right
         if 'publishedDate' in result:
-            result['pubdate'] = result['publishedDate'].strftime('%Y-%m-%d %H:%M:%S%z')
-            if result['publishedDate'].replace(tzinfo=None) >= datetime.now() - timedelta(days=1):
-                timedifference = datetime.now() - result['publishedDate'].replace(tzinfo=None)
-                minutes = int((timedifference.seconds / 60) % 60)
-                hours = int(timedifference.seconds / 60 / 60)
-                if hours == 0:
-                    result['publishedDate'] = gettext(u'{minutes} minute(s) ago').format(minutes=minutes)  # noqa
-                else:
-                    result['publishedDate'] = gettext(u'{hours} hour(s), {minutes} minute(s) ago').format(hours=hours, minutes=minutes)  # noqa
+            try:  # test if publishedDate >= 1900 (datetime module bug)
+                result['pubdate'] = result['publishedDate'].strftime('%Y-%m-%d %H:%M:%S%z')
+            except ValueError:
+                result['publishedDate'] = None
             else:
-                result['publishedDate'] = format_date(result['publishedDate'])
+                if result['publishedDate'].replace(tzinfo=None) >= datetime.now() - timedelta(days=1):
+                    timedifference = datetime.now() - result['publishedDate'].replace(tzinfo=None)
+                    minutes = int((timedifference.seconds / 60) % 60)
+                    hours = int(timedifference.seconds / 60 / 60)
+                    if hours == 0:
+                        result['publishedDate'] = gettext(u'{minutes} minute(s) ago').format(minutes=minutes)
+                    else:
+                        result['publishedDate'] = gettext(u'{hours} hour(s), {minutes} minute(s) ago').format(hours=hours, minutes=minutes)  # noqa
+                else:
+                    result['publishedDate'] = format_date(result['publishedDate'])
 
     if search.request_data.get('format') == 'json':
         return Response(json.dumps({'query': search.query,
-                                    'results': search.results}),
+                                    'number_of_results': search.result_container.number_of_results,
+                                    'results': search.result_container.get_ordered_results()}),
                         mimetype='application/json')
     elif search.request_data.get('format') == 'csv':
         csv = UnicodeWriter(cStringIO.StringIO())
         keys = ('title', 'url', 'content', 'host', 'engine', 'score')
-        if search.results:
-            csv.writerow(keys)
-            for row in search.results:
-                row['host'] = row['parsed_url'].netloc
-                csv.writerow([row.get(key, '') for key in keys])
-            csv.stream.seek(0)
+        csv.writerow(keys)
+        for row in search.result_container.get_ordered_results():
+            row['host'] = row['parsed_url'].netloc
+            csv.writerow([row.get(key, '') for key in keys])
+        csv.stream.seek(0)
         response = Response(csv.stream.read(), mimetype='application/csv')
-        cont_disp = 'attachment;Filename=searx_-_{0}.csv'.format(search.query)
+        cont_disp = 'attachment;Filename=searx_-_{0}.csv'.format(search.query.encode('utf-8'))
         response.headers.add('Content-Disposition', cont_disp)
         return response
     elif search.request_data.get('format') == 'rss':
         response_rss = render(
             'opensearch_response_rss.xml',
-            results=search.results,
+            results=search.result_container.get_ordered_results(),
             q=search.request_data['q'],
-            number_of_results=len(search.results),
+            number_of_results=search.result_container.number_of_results,
             base_url=get_base_url()
         )
         return Response(response_rss, mimetype='text/xml')
 
     return render(
         'results.html',
-        results=search.results,
+        results=search.result_container.get_ordered_results(),
         q=search.request_data['q'],
         selected_categories=search.categories,
         paging=search.paging,
+        number_of_results=format_decimal(search.result_container.number_of_results),
         pageno=search.pageno,
         base_url=get_base_url(),
-        suggestions=search.suggestions,
-        answers=search.answers,
-        infoboxes=search.infoboxes,
+        suggestions=search.result_container.suggestions,
+        answers=search.result_container.answers,
+        infoboxes=search.result_container.infoboxes,
         theme=get_current_theme_name(),
         favicons=global_favicons[themes.index(get_current_theme_name())]
     )
@@ -472,10 +482,10 @@ def autocompleter():
         request_data = request.args
 
     # set blocked engines
-    blocked_engines = get_blocked_engines(engines, request.cookies)
+    disabled_engines = request.preferences.engines.get_disabled()
 
     # parse query
-    query = Query(request_data.get('q', '').encode('utf-8'), blocked_engines)
+    query = Query(request_data.get('q', '').encode('utf-8'), disabled_engines)
     query.parse_query()
 
     # check if search query is set
@@ -483,15 +493,21 @@ def autocompleter():
         return '', 400
 
     # run autocompleter
-    completer = autocomplete_backends.get(request.cookies.get('autocomplete'))
+    completer = autocomplete_backends.get(request.preferences.get_value('autocomplete'))
 
     # parse searx specific autocompleter results like !bang
     raw_results = searx_bang(query)
 
     # normal autocompletion results only appear if max 3 inner results returned
     if len(raw_results) <= 3 and completer:
+        # get language from cookie
+        language = request.preferences.get_value('language')
+        if not language or language == 'all':
+            language = 'en'
+        else:
+            language = language.split('_')[0]
         # run autocompletion
-        raw_results.extend(completer(query.getSearchQuery()))
+        raw_results.extend(completer(query.getSearchQuery(), language))
 
     # parse results (write :language and !engine back to result string)
     results = []
@@ -512,130 +528,55 @@ def autocompleter():
 
 @app.route('/preferences', methods=['GET', 'POST'])
 def preferences():
-    """Render preferences page.
+    """Render preferences page && save user preferences"""
 
-    Settings that are going to be saved as cookies."""
-    lang = None
-    image_proxy = request.cookies.get('image_proxy', settings['server'].get('image_proxy'))
+    # save preferences
+    if request.method == 'POST':
+        resp = make_response(redirect(urljoin(settings['server']['base_url'], url_for('index'))))
+        try:
+            request.preferences.parse_form(request.form)
+        except ValidationException:
+            # TODO use flash feature of flask
+            return resp
+        return request.preferences.save(resp)
 
-    if request.cookies.get('language')\
-       and request.cookies['language'] in (x[0] for x in language_codes):
-        lang = request.cookies['language']
+    # render preferences
+    image_proxy = request.preferences.get_value('image_proxy')
+    lang = request.preferences.get_value('language')
+    disabled_engines = request.preferences.engines.get_disabled()
+    allowed_plugins = request.preferences.plugins.get_enabled()
 
-    blocked_engines = []
+    # stats for preferences page
+    stats = {}
 
-    resp = make_response(redirect(url_for('index')))
+    for c in categories:
+        for e in categories[c]:
+            stats[e.name] = {'time': None,
+                             'warn_timeout': False,
+                             'warn_time': False}
+            if e.timeout > settings['outgoing']['request_timeout']:
+                stats[e.name]['warn_timeout'] = True
 
-    if request.method == 'GET':
-        blocked_engines = get_blocked_engines(engines, request.cookies)
-    else:  # on save
-        selected_categories = []
-        post_disabled_plugins = []
-        locale = None
-        autocomplete = ''
-        method = 'POST'
-        safesearch = '1'
-        for pd_name, pd in request.form.items():
-            if pd_name.startswith('category_'):
-                category = pd_name[9:]
-                if category not in categories:
-                    continue
-                selected_categories.append(category)
-            elif pd_name == 'locale' and pd in settings['locales']:
-                locale = pd
-            elif pd_name == 'image_proxy':
-                image_proxy = pd
-            elif pd_name == 'autocomplete':
-                autocomplete = pd
-            elif pd_name == 'language' and (pd == 'all' or
-                                            pd in (x[0] for
-                                                   x in language_codes)):
-                lang = pd
-            elif pd_name == 'method':
-                method = pd
-            elif pd_name == 'safesearch':
-                safesearch = pd
-            elif pd_name.startswith('engine_'):
-                if pd_name.find('__') > -1:
-                    # TODO fix underscore vs space
-                    engine_name, category = [x.replace('_', ' ') for x in
-                                             pd_name.replace('engine_', '', 1).split('__', 1)]
-                    if engine_name in engines and category in engines[engine_name].categories:
-                        blocked_engines.append((engine_name, category))
-            elif pd_name == 'theme':
-                theme = pd if pd in themes else default_theme
-            elif pd_name.startswith('plugin_'):
-                plugin_id = pd_name.replace('plugin_', '', 1)
-                if not any(plugin.id == plugin_id for plugin in plugins):
-                    continue
-                post_disabled_plugins.append(plugin_id)
-            else:
-                resp.set_cookie(pd_name, pd, max_age=cookie_max_age)
+    for engine_stat in get_engines_stats()[0][1]:
+        stats[engine_stat.get('name')]['time'] = round(engine_stat.get('avg'), 3)
+        if engine_stat.get('avg') > settings['outgoing']['request_timeout']:
+            stats[engine_stat.get('name')]['warn_time'] = True
+    # end of stats
 
-        disabled_plugins = []
-        allowed_plugins = []
-        for plugin in plugins:
-            if plugin.default_on:
-                if plugin.id in post_disabled_plugins:
-                    disabled_plugins.append(plugin.id)
-            elif plugin.id not in post_disabled_plugins:
-                allowed_plugins.append(plugin.id)
-
-        resp.set_cookie('disabled_plugins', ','.join(disabled_plugins), max_age=cookie_max_age)
-
-        resp.set_cookie('allowed_plugins', ','.join(allowed_plugins), max_age=cookie_max_age)
-
-        resp.set_cookie(
-            'blocked_engines', ','.join('__'.join(e) for e in blocked_engines),
-            max_age=cookie_max_age
-        )
-
-        if locale:
-            resp.set_cookie(
-                'locale', locale,
-                max_age=cookie_max_age
-            )
-
-        if lang:
-            resp.set_cookie(
-                'language', lang,
-                max_age=cookie_max_age
-            )
-
-        if selected_categories:
-            # cookie max age: 4 weeks
-            resp.set_cookie(
-                'categories', ','.join(selected_categories),
-                max_age=cookie_max_age
-            )
-
-            resp.set_cookie(
-                'autocomplete', autocomplete,
-                max_age=cookie_max_age
-            )
-
-        resp.set_cookie('method', method, max_age=cookie_max_age)
-
-        resp.set_cookie('safesearch', safesearch, max_age=cookie_max_age)
-
-        resp.set_cookie('image_proxy', image_proxy, max_age=cookie_max_age)
-
-        resp.set_cookie('theme', theme, max_age=cookie_max_age)
-
-        return resp
     return render('preferences.html',
                   locales=settings['locales'],
                   current_locale=get_locale(),
-                  current_language=lang or 'all',
+                  current_language=lang,
                   image_proxy=image_proxy,
                   language_codes=language_codes,
                   engines_by_category=categories,
-                  blocked_engines=blocked_engines,
+                  stats=stats,
+                  disabled_engines=disabled_engines,
                   autocomplete_backends=autocomplete_backends,
                   shortcuts={y: x for x, y in engine_shortcuts.items()},
                   themes=themes,
                   plugins=plugins,
-                  allowed_plugins=[plugin.id for plugin in request.user_plugins],
+                  allowed_plugins=allowed_plugins,
                   theme=get_current_theme_name())
 
 
@@ -656,7 +597,7 @@ def image_proxy():
 
     resp = requests.get(url,
                         stream=True,
-                        timeout=settings['server'].get('request_timeout', 2),
+                        timeout=settings['outgoing']['request_timeout'],
                         headers=headers,
                         proxies=outgoing_proxies)
 
@@ -670,7 +611,7 @@ def image_proxy():
         return '', 400
 
     if not resp.headers.get('content-type', '').startswith('image/'):
-        logger.debug('image-proxy: wrong content-type: {0}'.format(resp.get('content-type')))
+        logger.debug('image-proxy: wrong content-type: {0}'.format(resp.headers.get('content-type')))
         return '', 400
 
     img = ''
@@ -711,7 +652,7 @@ Disallow: /preferences
 def opensearch():
     method = 'post'
 
-    if request.cookies.get('method', 'POST') == 'GET':
+    if request.preferences.get_value('method') == 'GET':
         method = 'get'
 
     # chrome/chromium only supports HTTP GET....
@@ -720,7 +661,8 @@ def opensearch():
 
     ret = render('opensearch.xml',
                  opensearch_method=method,
-                 host=get_base_url())
+                 host=get_base_url(),
+                 urljoin=urljoin)
 
     resp = Response(response=ret,
                     status=200,
@@ -740,24 +682,79 @@ def favicon():
 
 @app.route('/clear_cookies')
 def clear_cookies():
-    resp = make_response(redirect(url_for('index')))
+    resp = make_response(redirect(urljoin(settings['server']['base_url'], url_for('index'))))
     for cookie_name in request.cookies:
         resp.delete_cookie(cookie_name)
     return resp
 
 
+@app.route('/config')
+def config():
+    return jsonify({'categories': categories.keys(),
+                    'engines': [{'name': engine_name,
+                                 'categories': engine.categories,
+                                 'shortcut': engine.shortcut,
+                                 'enabled': not engine.disabled}
+                                for engine_name, engine in engines.items()],
+                    'plugins': [{'name': plugin.name,
+                                 'enabled': plugin.default_on}
+                                for plugin in plugins],
+                    'instance_name': settings['general']['instance_name'],
+                    'locales': settings['locales'],
+                    'default_locale': settings['ui']['default_locale'],
+                    'autocomplete': settings['search']['autocomplete'],
+                    'safe_search': settings['search']['safe_search'],
+                    'default_theme': settings['ui']['default_theme']})
+
+
 def run():
     app.run(
-        debug=settings['server']['debug'],
-        use_debugger=settings['server']['debug'],
-        port=settings['server']['port']
+        debug=settings['general']['debug'],
+        use_debugger=settings['general']['debug'],
+        port=settings['server']['port'],
+        host=settings['server']['bind_address']
     )
 
 
+class ReverseProxyPathFix(object):
+    '''Wrap the application in this middleware and configure the
+    front-end server to add these headers, to let you quietly bind
+    this to a URL other than / and to an HTTP scheme that is
+    different than what is used locally.
+
+    http://flask.pocoo.org/snippets/35/
+
+    In nginx:
+    location /myprefix {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Scheme $scheme;
+        proxy_set_header X-Script-Name /myprefix;
+        }
+
+    :param app: the WSGI application
+    '''
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        script_name = environ.get('HTTP_X_SCRIPT_NAME', '')
+        if script_name:
+            environ['SCRIPT_NAME'] = script_name
+            path_info = environ['PATH_INFO']
+            if path_info.startswith(script_name):
+                environ['PATH_INFO'] = path_info[len(script_name):]
+
+        scheme = environ.get('HTTP_X_SCHEME', '')
+        if scheme:
+            environ['wsgi.url_scheme'] = scheme
+        return self.app(environ, start_response)
+
+
 application = app
-
-app.wsgi_app = ProxyFix(application.wsgi_app)
-
+# patch app to handle non root url-s behind proxy & wsgi
+app.wsgi_app = ReverseProxyPathFix(ProxyFix(application.wsgi_app))
 
 if __name__ == "__main__":
     run()
